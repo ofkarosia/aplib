@@ -1,4 +1,4 @@
-# [aplib](https://github.com/karosia/aplib)
+# [aplib](https://github.com/ofkarosia/aplib)
 
 A Rust port of the **decompression** algorithm of aPLib.
 
