@@ -43,11 +43,11 @@ enum BlockType {
 }
 
 impl<'a> AplibContext<'a> {
-    fn new(source: &'a [u8], strict: bool) -> Self {
+    fn new(source: &'a [u8], strict: bool, size_hint: Option<usize>) -> Self {
         Self {
             source,
             src_pos: 0,
-            destination: Vec::new(),
+            destination: Vec::with_capacity(size_hint.unwrap_or_default()),
             tag: 0,
             bitcount: 0,
             strict,
@@ -239,7 +239,7 @@ fn verify_size(expect_size: u32, input: &[u8], crc: u32) -> Result<(), AplibErro
 
 pub fn decompress(data: &[u8], strict: bool) -> Result<Vec<u8>, AplibError> {
     if !data.starts_with(b"AP32") || data.len() < 24 {
-        let ctx = AplibContext::new(data, strict);
+        let ctx = AplibContext::new(data, strict, None);
         return ctx.depack();
     }
 
@@ -264,7 +264,7 @@ pub fn decompress(data: &[u8], strict: bool) -> Result<Vec<u8>, AplibError> {
         verify_size(packed_size, input, packed_crc)?;
     }
 
-    let ctx = AplibContext::new(input, strict);
+    let ctx = AplibContext::new(input, strict, Some(orig_size as usize));
     let result = ctx.depack()?;
 
     if strict {
