@@ -29,7 +29,6 @@ struct AplibContext<'a> {
     destination: Vec<u8>,
     tag: u8,
     bitcount: i8,
-    strict: bool,
     r0: usize,
     lwm: u8,
 }
@@ -43,14 +42,13 @@ enum BlockType {
 }
 
 impl<'a> AplibContext<'a> {
-    fn new(source: &'a [u8], strict: bool, size_hint: Option<usize>) -> Self {
+    fn new(source: &'a [u8], size_hint: Option<usize>) -> Self {
         Self {
             source,
             src_pos: 0,
             destination: Vec::with_capacity(size_hint.unwrap_or_default()),
             tag: 0,
             bitcount: 0,
-            strict,
             r0: usize::MAX,
             lwm: 0,
         }
@@ -87,6 +85,11 @@ impl<'a> AplibContext<'a> {
     }
 
     fn decode_block_type(&mut self) -> Result<BlockType, AplibError> {
+        // Determine block type by reading prefix bits
+        // 0       -> Literal
+        // 10      -> LargeMatch
+        // 110     -> ShortMatch
+        // 111     -> SingleByte
         if self.get_bit()? == 0 {
             return Ok(BlockType::Literal);
         }
@@ -190,36 +193,11 @@ impl<'a> AplibContext<'a> {
 
     fn depack(mut self) -> Result<Vec<u8>, AplibError> {
         // first byte verbatim
-        match self.read_byte() {
-            Ok(b) => self.destination.push(b),
-            Err(e) => {
-                if self.strict {
-                    return Err(e);
-                }
-                return Ok(self.destination);
-            }
-        }
+        let first_byte = self.read_byte()?;
+        self.destination.push(first_byte);
 
-        loop {
-            // Determine block type by reading prefix bits
-            // 0       -> Literal
-            // 10      -> LargeMatch
-            // 110     -> ShortMatch
-            // 111     -> SingleByte
-            match self.process_block() {
-                Ok(done) => {
-                    if done {
-                        break Ok(self.destination);
-                    }
-                }
-                Err(e) => {
-                    if self.strict {
-                        break Err(e);
-                    }
-                    break Ok(self.destination);
-                }
-            }
-        }
+        while !self.process_block()? {}
+        Ok(self.destination)
     }
 }
 
@@ -237,9 +215,9 @@ fn verify_size(expect_size: u32, input: &[u8], crc: u32) -> Result<(), AplibErro
     Ok(())
 }
 
-pub fn decompress(data: &[u8], strict: bool) -> Result<Vec<u8>, AplibError> {
+pub fn decompress(data: &[u8]) -> Result<Vec<u8>, AplibError> {
     if !data.starts_with(b"AP32") || data.len() < 24 {
-        let ctx = AplibContext::new(data, strict, None);
+        let ctx = AplibContext::new(data, None);
         return ctx.depack();
     }
 
@@ -260,16 +238,12 @@ pub fn decompress(data: &[u8], strict: bool) -> Result<Vec<u8>, AplibError> {
     }
     let input = &data[header_size..end];
 
-    if strict {
-        verify_size(packed_size, input, packed_crc)?;
-    }
+    verify_size(packed_size, input, packed_crc)?;
 
-    let ctx = AplibContext::new(input, strict, Some(orig_size as usize));
+    let ctx = AplibContext::new(input, Some(orig_size as usize));
     let result = ctx.depack()?;
 
-    if strict {
-        verify_size(orig_size, &result, orig_crc)?;
-    }
+    verify_size(orig_size, &result, orig_crc)?;
 
     Ok(result)
 }
@@ -283,7 +257,7 @@ mod tests {
         let data =
             b"T\x00he quick\xecb\x0erown\xcef\xaex\x80jumps\xed\xe4veur`t?lazy\xead\xfeg\xc0\x00";
         let expected = b"The quick brown fox jumps over the lazy dog";
-        let result = decompress(data, true).unwrap();
+        let result = decompress(data).unwrap();
         assert_eq!(result, expected);
     }
 }
