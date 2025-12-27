@@ -78,10 +78,13 @@ impl<'a> AplibContext<'a> {
 
     fn get_gamma(&mut self) -> Result<usize, AplibError> {
         let mut result: usize = 1;
-        while self.get_bit()? == 1 {
+        
+        loop {
             result = (result << 1) + (self.get_bit()? as usize);
+            if self.get_bit()? == 0 {
+                break Ok(result)
+            }
         }
-        Ok(result)
     }
 
     fn decode_block_type(&mut self) -> Result<BlockType, AplibError> {
