@@ -218,9 +218,9 @@ fn verify_size(expect_size: u32, input: &[u8], crc: u32) -> Result<(), AplibErro
     Ok(())
 }
 
-pub fn decompress(data: &[u8]) -> Result<Vec<u8>, AplibError> {
+fn decompress_with(data: &[u8], size_hint: Option<usize>) -> Result<Vec<u8>, AplibError> {
     if !data.starts_with(b"AP32") || data.len() < 24 {
-        let ctx = AplibContext::new(data, None);
+        let ctx = AplibContext::new(data, size_hint);
         return ctx.depack();
     }
 
@@ -251,9 +251,26 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, AplibError> {
     Ok(result)
 }
 
+pub fn decompress(data: &[u8]) -> Result<Vec<u8>, AplibError> {
+    decompress_with(data, None)
+}
+
+pub fn decompress_with_size_hint(data: &[u8], size_hint: usize) -> Result<Vec<u8>, AplibError> {
+    decompress_with(data, Some(size_hint))
+}
+
+pub fn decompress_exact(data: &[u8], size: usize) -> Result<Vec<u8>, AplibError> {
+    let decompressed = decompress_with_size_hint(data, size)?;
+    if decompressed.len() != size {
+        return Err(AplibError::SizeMismatch)
+    }
+
+    Ok(decompressed)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::decompress;
 
     #[test]
     fn test_decompress() {
