@@ -1,6 +1,8 @@
-# [aplib](https://github.com/ofkarosia/aplib)
+# aplib
 
 A Rust port of the **decompression** algorithm of aPLib.
+
+Currently this library is designed to be used by [evbunpack_core](https://github.com/ofkarosia/evbunpack_core).
 
 ## License
 
