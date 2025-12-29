@@ -1,32 +1,25 @@
+use std::result;
 use crc32fast::Hasher;
-use std::error::Error;
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AplibError {
-    ReadError,
-    FormatError(&'static str),
-    CrcError,
-    SizeMismatch,
+    #[error("Out of bounds")]
+    OutOfBounds,
+    #[error("CRC mismatch")]
+    CrcMismatch,
+    #[error("Invalid offset")]
+    InvalidOffset,
+    #[error("Size mismatch: {0}")]
+    SizeMismatch(&'static str),
+    #[error("Input too short for {0}")]
+    InputTooShort(&'static str)
 }
 
-impl fmt::Display for AplibError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AplibError::ReadError => write!(f, "Read error"),
-            AplibError::FormatError(msg) => write!(f, "Format error: {}", msg),
-            AplibError::CrcError => write!(f, "CRC mismatch"),
-            AplibError::SizeMismatch => write!(f, "Size mismatch"),
-        }
-    }
-}
-
-impl Error for AplibError {}
-
-struct AplibContext<'a> {
+struct AplibContext<'a, 'b> {
     source: &'a [u8],
     src_pos: usize,
-    destination: Vec<u8>,
+    destination: &'b mut Vec<u8>,
     tag: u8,
     bitcount: i8,
     r0: usize,
@@ -41,12 +34,14 @@ enum BlockType {
     SingleByte,
 }
 
-impl<'a> AplibContext<'a> {
-    fn new(source: &'a [u8], size_hint: Option<usize>) -> Self {
+pub type Result<T> = result::Result<T, AplibError>;
+
+impl<'a, 'b> AplibContext<'a, 'b> {
+    fn new(source: &'a [u8], destination: &'b mut Vec<u8>) -> Self {
         Self {
             source,
             src_pos: 0,
-            destination: Vec::with_capacity(size_hint.unwrap_or_default()),
+            destination,
             tag: 0,
             bitcount: 0,
             r0: usize::MAX,
@@ -54,17 +49,17 @@ impl<'a> AplibContext<'a> {
         }
     }
 
-    fn read_byte(&mut self) -> Result<u8, AplibError> {
+    fn read_byte(&mut self) -> Result<u8> {
         if self.src_pos < self.source.len() {
             let b = self.source[self.src_pos];
             self.src_pos += 1;
             Ok(b)
         } else {
-            Err(AplibError::ReadError)
+            Err(AplibError::OutOfBounds)
         }
     }
 
-    fn get_bit(&mut self) -> Result<u8, AplibError> {
+    fn get_bit(&mut self) -> Result<u8> {
         self.bitcount -= 1;
         if self.bitcount < 0 {
             self.tag = self.read_byte()?;
@@ -76,7 +71,7 @@ impl<'a> AplibContext<'a> {
         Ok(bit)
     }
 
-    fn get_gamma(&mut self) -> Result<usize, AplibError> {
+    fn get_gamma(&mut self) -> Result<usize> {
         let mut result: usize = 1;
         
         loop {
@@ -87,7 +82,7 @@ impl<'a> AplibContext<'a> {
         }
     }
 
-    fn decode_block_type(&mut self) -> Result<BlockType, AplibError> {
+    fn decode_block_type(&mut self) -> Result<BlockType> {
         // Determine block type by reading prefix bits
         // 0       -> Literal
         // 10      -> LargeMatch
@@ -106,19 +101,32 @@ impl<'a> AplibContext<'a> {
     }
 
     // Helper to copy data from the already decompressed buffer (lz history)
-    fn copy_from_history(&mut self, offset: usize, length: usize) -> Result<(), AplibError> {
+    fn copy_from_history(&mut self, offset: usize, length: usize) -> Result<()> {
         if offset == 0 || offset > self.destination.len() {
-            return Err(AplibError::FormatError("Invalid offset"));
+            return Err(AplibError::InvalidOffset);
         }
 
-        for _ in 0..length {
-            let val = self.destination[self.destination.len() - offset];
-            self.destination.push(val);
+        if offset == 1 {
+            let last = *self.destination.last().unwrap();
+            self.destination.resize(self.destination.len() + length, last);
+            return Ok(())
         }
+
+        self.destination.reserve(length);
+        let start = self.destination.len() - offset;
+
+        if offset >= length {
+            self.destination.extend_from_within(start..start + length);
+        } else {
+            for i in 0..length {
+                self.destination.push(self.destination[start + i])
+            }
+        }
+
         Ok(())
     }
 
-    fn process_block(&mut self) -> Result<bool, AplibError> {
+    fn process_block(&mut self) -> Result<bool> {
         let block_type = self.decode_block_type()?;
         match block_type {
             BlockType::Literal => {
@@ -194,78 +202,127 @@ impl<'a> AplibContext<'a> {
         Ok(false)
     }
 
-    fn depack(mut self) -> Result<Vec<u8>, AplibError> {
+    fn depack(mut self) -> Result<()> {
         // first byte verbatim
         let first_byte = self.read_byte()?;
         self.destination.push(first_byte);
 
         while !self.process_block()? {}
-        Ok(self.destination)
+        Ok(())
     }
 }
 
-fn verify_size(expect_size: u32, input: &[u8], crc: u32) -> Result<(), AplibError> {
+fn verify_size(expect_size: u32, input: &[u8], crc: u32, error_msg: &'static str) -> Result<()> {
     if expect_size as usize != input.len() {
-        return Err(AplibError::SizeMismatch);
+        return Err(AplibError::SizeMismatch(error_msg));
     }
 
     let mut hasher = Hasher::new();
     hasher.update(input);
     if crc != hasher.finalize() {
-        return Err(AplibError::CrcError);
+        return Err(AplibError::CrcMismatch);
     }
 
     Ok(())
 }
 
-fn decompress_with(data: &[u8], size_hint: Option<usize>) -> Result<Vec<u8>, AplibError> {
-    if !data.starts_with(b"AP32") || data.len() < 24 {
-        let ctx = AplibContext::new(data, size_hint);
-        return ctx.depack();
-    }
-
-    let header_slice = &data[4..24];
-    let header_size = u32::from_le_bytes(header_slice[0..4].try_into().unwrap()) as usize;
-    let packed_size = u32::from_le_bytes(header_slice[4..8].try_into().unwrap());
-    let packed_crc = u32::from_le_bytes(header_slice[8..12].try_into().unwrap());
-    let orig_size = u32::from_le_bytes(header_slice[12..16].try_into().unwrap());
-    let orig_crc = u32::from_le_bytes(header_slice[16..20].try_into().unwrap());
-
-    if data.len() < header_size {
-        return Err(AplibError::FormatError("Input too short for header"));
-    }
-
-    let end = header_size + packed_size as usize;
-    if data.len() < end {
-        return Err(AplibError::FormatError("Input too short for packed data"));
-    }
-    let input = &data[header_size..end];
-
-    verify_size(packed_size, input, packed_crc)?;
-
-    let ctx = AplibContext::new(input, Some(orig_size as usize));
-    let result = ctx.depack()?;
-
-    verify_size(orig_size, &result, orig_crc)?;
-
-    Ok(result)
+#[derive(Debug, Default, Clone, Copy)]
+struct AplibHeader {
+    header_size: usize,
+    packed_size: u32,
+    packed_crc: u32,
+    original_size: u32,
+    original_crc: u32
 }
 
-pub fn decompress(data: &[u8]) -> Result<Vec<u8>, AplibError> {
+fn read_header(input: &[u8]) -> Result<AplibHeader> {
+    let header_slice = &input[4..24];
+
+    let header = AplibHeader {
+        header_size: u32::from_le_bytes(header_slice[0..4].try_into().unwrap()) as usize,
+        packed_size: u32::from_le_bytes(header_slice[4..8].try_into().unwrap()),
+        packed_crc: u32::from_le_bytes(header_slice[8..12].try_into().unwrap()),
+        original_size: u32::from_le_bytes(header_slice[12..16].try_into().unwrap()),
+        original_crc: u32::from_le_bytes(header_slice[16..20].try_into().unwrap()),
+    };
+    
+
+    if input.len() < header.header_size {
+        return Err(AplibError::InputTooShort("header"));
+    }
+
+    let end = header.header_size + header.packed_size as usize;
+    if input.len() < end {
+        return Err(AplibError::InputTooShort("packed data"));
+    }
+    let input = &input[header.header_size..end];
+
+    verify_size(header.packed_crc, input, header.packed_crc, "packed size")?;
+    Ok(header)
+}
+
+#[inline]
+fn has_header(input: &[u8]) -> bool {
+    input.starts_with(b"AP32") && input.len() > 24
+}
+
+#[inline]
+fn create_vec(capacity: Option<usize>) -> Vec<u8> {
+    if let Some(size) = capacity { Vec::with_capacity(size) } else { Vec::new() }
+}
+
+#[inline]
+fn depack(data: &[u8], capacity: Option<usize>) -> Result<Vec<u8>> {
+    let mut destination = create_vec(capacity);
+    let ctx = AplibContext::new(data, &mut destination);
+    ctx.depack()?;
+    Ok(destination)
+}
+
+#[inline]
+fn depack_to(data: &[u8], destination: &mut Vec<u8>) -> Result<()> {
+    let ctx = AplibContext::new(data, destination);
+    ctx.depack()
+}
+
+fn decompress_with(data: &[u8], capacity: Option<usize>) -> Result<Vec<u8>> {
+    if !has_header(data) {
+        return depack(data, capacity)
+    }
+
+    let header = read_header(data)?;
+    let end = header.header_size + header.packed_size as usize;
+    let dst = depack(&data[header.header_size..end], capacity)?;
+    verify_size(header.original_size, &dst, header.original_crc, "original size")?;
+    Ok(dst)
+}
+
+pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     decompress_with(data, None)
 }
 
-pub fn decompress_with_size_hint(data: &[u8], size_hint: usize) -> Result<Vec<u8>, AplibError> {
-    decompress_with(data, Some(size_hint))
+pub fn decompress_with_capacity(data: &[u8], capacity: usize) -> Result<Vec<u8>> {
+    decompress_with(data, Some(capacity))
 }
 
-pub fn decompress_exact(data: &[u8], size: usize) -> Result<Vec<u8>, AplibError> {
-    let decompressed = decompress_with_size_hint(data, size)?;
+pub fn decompress_exact(data: &[u8], size: usize) -> Result<Vec<u8>> {
+    let decompressed = decompress_with_capacity(data, size)?;
     if decompressed.len() != size {
-        return Err(AplibError::SizeMismatch)
+        return Err(AplibError::SizeMismatch("decompressed size"))
     }
 
     Ok(decompressed)
+}
+
+pub fn decompress_to(data: &[u8], destination: &mut Vec<u8>) -> Result<()> {
+    if !has_header(data) {
+        return depack_to(data, destination)
+    }
+
+    let header = read_header(data)?;
+    let end = header.header_size + header.packed_size as usize;
+    depack_to(&data[header.header_size..end], destination)?;
+    verify_size(header.original_size, &destination, header.original_crc, "original size")
 }
 
 #[cfg(test)]
