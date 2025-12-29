@@ -322,7 +322,7 @@ pub fn decompress_to(data: &[u8], destination: &mut Vec<u8>) -> Result<()> {
     let header = read_header(data)?;
     let end = header.header_size + header.packed_size as usize;
     depack_to(&data[header.header_size..end], destination)?;
-    verify_size(header.original_size, &destination, header.original_crc, "original size")
+    verify_size(header.original_size, destination, header.original_crc, "original size")
 }
 
 #[cfg(test)]
